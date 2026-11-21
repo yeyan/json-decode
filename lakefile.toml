@@ -1,0 +1,16 @@
+name = "json-decode"
+version = "0.1.0"
+defaultTargets = ["JsonDecode"]
+testDriver = "Tests"
+
+[[lean_lib]]
+name = "JsonDecode"
+
+[[lean_lib]]
+name = "Tests"
+globs = ["Tests.+"]
+
+[[require]]
+name = "lean-fmt"
+git = "https://github.com/jcreinhold/lean-fmt" 
+rev = "v4.36.0"
