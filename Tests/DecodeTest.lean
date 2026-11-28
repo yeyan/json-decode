@@ -1,182 +1,150 @@
-import JsonDecode
+import JsonDecoder
 
 open Lean
 
+namespace Tests
+
 /-! ## Helpers -/
 
-/-- Parse `s` as JSON, then run the decoder starting at `path`. Errors are rendered to strings. -/
-def runAt (path : Path) (dec : Decode α) (s : String) : Except String α := do
-  let j ← Json.parse s
-  (Decode.decode dec j path).mapError toString
+/-- Parse a JSON literal; panics on malformed input (tests only). -/
+def j (s : String) : Json :=
+  match Json.parse s with
+  | .ok v => v
+  | .error e => panic! s!"bad test JSON: {e}"
 
-def run (dec : Decode α) (s : String) : Except String α :=
-  runAt [] dec s
-
-def succeeds [BEq α] (r : Except String α) (expected : α) : Bool :=
+/-- Succeeded with exactly this value. -/
+def okEq [BEq α] (r : Except DecodeError α) (expected : α) : Bool :=
   match r with
   | .ok x => x == expected
   | .error _ => false
 
-def failsWith (r : Except String α) (msg : String) : Bool :=
+/-- Failed with this kind, at this rendered path (e.g. "$.a[1].b"). -/
+def errIs (r : Except DecodeError α) (kind : DecodeError.Kind) (path : String) : Bool :=
   match r with
-  | .error e => e == msg
   | .ok _ => false
+  | .error e => e.kind == kind && toString e.ctx.path == path
 
-def fails (r : Except String α) : Bool :=
+/-- Failed with exactly this rendered message. -/
+def errMsg (r : Except DecodeError α) (msg : String) : Bool :=
   match r with
-  | .error _ => true
   | .ok _ => false
+  | .error e => toString e == msg
 
-/-! ## Path rendering -/
-
-#guard toString ([] : Path) == "$"
-
-#guard toString ([.key "a"] : Path) == "$.a"
-
-#guard toString ([.key "name", .idx 2, .key "items"] : Path) == "$.items[2].name"
+open Decoder
 
 /-! ## Primitives -/
 
--- str
-#guard succeeds (run Decode.str "\"hi\"") "hi"
+#guard okEq (decode str (j "\"hi\"")) "hi"
+#guard errIs (decode str (j "1")) (.wrongType "string") "$"
 
-#guard failsWith (run Decode.str "1") "at $ expecting string but got number"
+#guard okEq (decode int (j "5")) (5 : Int)
+#guard okEq (decode int (j "-3")) (-3 : Int)
+#guard errIs (decode int (j "\"x\"")) (.wrongType "integer") "$"
+-- Documents current behaviour: numbers with a fractional/exponent part are rejected.
+#guard errIs (decode int (j "5.5")) (.invalid "expecting an integer") "$"
 
--- nat
-#guard succeeds (run Decode.nat "42") 42
+#guard okEq (decode nat (j "7")) (7 : Nat)
+#guard okEq (decode nat (j "0")) (0 : Nat)
+#guard errIs (decode nat (j "-1")) (.invalid "expecting a non-negative integer") "$"
+#guard errIs (decode nat (j "true")) (.wrongType "number") "$"
 
-#guard succeeds (run Decode.nat "0") 0
+#guard okEq (decode float (j "1.5")) (1.5 : Float)
+#guard okEq (decode float (j "2")) (2.0 : Float)
+#guard errIs (decode float (j "null")) (.wrongType "float") "$"
 
-#guard failsWith (run Decode.nat "-1") "at $ invalid: expecting a non-negative integer"
+/-! ## field -/
 
-#guard failsWith (run Decode.nat "1.5") "at $ invalid: expecting a non-negative integer"
+#guard okEq (decode (field "a" int) (j "{\"a\": 1}")) (1 : Int)
+#guard errIs (decode (field "b" int) (j "{\"a\": 1}")) (.missing "b") "$"
+#guard errIs (decode (field "a" int) (j "[1]")) (.wrongType "object") "$"
+#guard errIs (decode (field "a" int) (j "{\"a\": \"x\"}")) (.wrongType "integer") "$.a"
 
-#guard failsWith (run Decode.nat "\"x\"") "at $ expecting number but got string"
+-- nested paths
+#guard okEq (decode (field "a" (field "b" int)) (j "{\"a\":{\"b\":1}}")) (1 : Int)
+#guard errIs (decode (field "a" (field "b" int)) (j "{\"a\":{\"b\":\"x\"}}"))
+  (.wrongType "integer") "$.a.b"
+#guard errIs (decode (field "a" (field "b" int)) (j "{\"a\":{}}")) (.missing "b") "$.a"
 
--- int
-#guard succeeds (run Decode.int "-7") (-7 : Int)
+/-! ## optField -/
 
-#guard succeeds (run Decode.int "7") (7 : Int)
+#guard okEq (decode (optField "x" int) (j "{\"x\": 4}")) (some (4 : Int))
+#guard okEq (decode (optField "x" int) (j "{}")) (none : Option Int)
+#guard okEq (decode (optField "x" int) (j "{\"x\": null}")) (none : Option Int)
+-- present but wrong type must be an error, not silently `none`
+#guard errIs (decode (optField "x" int) (j "{\"x\": \"s\"}")) (.wrongType "integer") "$.x"
+#guard errIs (decode (optField "x" int) (j "[]")) (.wrongType "object") "$"
 
-#guard failsWith (run Decode.int "1.5") "at $ invalid: expecting an integer"
+/-! ## index -/
 
-#guard failsWith (run Decode.int "null") "at $ expecting number but got null"
-
--- float
-#guard succeeds (run Decode.float "2.5") 2.5
-
-#guard succeeds (run Decode.float "3") 3.0
-
-#guard failsWith (run Decode.float "true") "at $ expecting float but got bool"
-
--- as (message text comes from FromJson, so only check that it fails)
-#guard succeeds (run (Decode.as Nat) "5") 5
-
-#guard succeeds (run (Decode.as (Array String)) "[\"a\",\"b\"]") #["a", "b"]
-
-#guard fails (run (Decode.as Nat) "\"x\"")
-
-/-! ## field / index -/
-
-#guard succeeds (run (Decode.field "a" Decode.nat) "{\"a\": 1}") 1
-
-#guard failsWith (run (Decode.field "a" Decode.nat) "{}") "at $ field a not found"
-
--- documents current behaviour: a non-object also reports "not found"
-#guard failsWith (run (Decode.field "a" Decode.nat) "[]") "at $ field a not found"
-
--- the error path points inside the nested value
-#guard
-  failsWith (run (Decode.field "a" (Decode.field "b" Decode.nat)) "{\"a\": {\"b\": \"x\"}}")
-    "at $.a.b expecting number but got string"
-
--- a missing field is reported at the parent
-#guard
-  failsWith (run (Decode.field "a" (Decode.field "b" Decode.nat)) "{\"a\": {}}")
-    "at $.a field b not found"
-
-#guard succeeds (run (Decode.index 1 Decode.nat) "[10, 20, 30]") 20
-
-#guard failsWith (run (Decode.index 5 Decode.nat) "[10, 20, 30]") "at $ index 5 out of bound"
-
-#guard failsWith (run (Decode.index 0 Decode.nat) "{}") "at $ index 0 out of bound"
+#guard okEq (decode (index 1 int) (j "[10, 20]")) (20 : Int)
+#guard errIs (decode (index 2 int) (j "[10, 20]")) (.outOfBound 2) "$"
+#guard errIs (decode (index 1 int) (j "[10, \"x\"]")) (.wrongType "integer") "$[1]"
+-- Requires `index` to check for an array first (see the suggested fix):
+#guard errIs (decode (index 0 int) (j "{\"a\": 1}")) (.wrongType "array") "$"
 
 /-! ## array -/
 
-#guard succeeds (run (Decode.array Decode.nat) "[1, 2, 3]") #[1, 2, 3]
-
-#guard succeeds (run (Decode.array Decode.nat) "[]") #[]
-
-#guard failsWith (run (Decode.array Decode.nat) "{}") "at $ expecting array but got object"
-
-#guard
-  failsWith (run (Decode.array Decode.nat) "[1, \"x\", 3]")
-    "at $[1] expecting number but got string"
-
-#guard
-  failsWith (run (Decode.array (Decode.array Decode.nat)) "[[1], [2, \"x\"]]")
-    "at $[1][1] expecting number but got string"
-
--- full path through object -> array -> object
-#guard
-  failsWith
-    (run (Decode.field "items" (Decode.array (Decode.field "name" Decode.str)))
-      "{\"items\": [{\"name\": \"a\"}, {\"name\": 5}]}")
-    "at $.items[1].name expecting string but got number"
+#guard okEq (decode (array int) (j "[1,2,3]")) (#[1, 2, 3] : Array Int)
+#guard okEq (decode (array int) (j "[]")) (#[] : Array Int)
+#guard errIs (decode (array int) (j "{}")) (.wrongType "array") "$"
+#guard errIs (decode (array int) (j "[1,\"x\",3]")) (.wrongType "integer") "$[1]"
+#guard errIs (decode (field "xs" (array (field "n" int))) (j "{\"xs\":[{\"n\":1},{\"n\":\"a\"}]}"))
+  (.wrongType "integer") "$.xs[1].n"
+#guard errIs (decode (field "xs" (array (field "n" int))) (j "{\"xs\":[{\"n\":1},{}]}"))
+  (.missing "n") "$.xs[1]"
 
 /-! ## parse -/
 
-private def status : Decode Bool :=
-  Decode.parse
-    (fun s =>
-      if s == "open" then .ok true
-      else if s == "closed" then .ok false else .error s!"unknown status {s}")
-    Decode.str
+def nonEmpty (s : String) : Except String Nat :=
+  if s.isEmpty then .error "empty" else .ok s.length
 
-#guard succeeds (run status "\"open\"") true
+#guard okEq (decode (parse nonEmpty str) (j "\"abc\"")) (3 : Nat)
+#guard errIs (decode (parse nonEmpty str) (j "\"\"")) (.invalid "empty") "$"
+-- inner decoder failure passes through unchanged
+#guard errIs (decode (parse nonEmpty str) (j "1")) (.wrongType "string") "$"
 
-#guard succeeds (run status "\"closed\"") false
+/-! ## orNone -/
 
-#guard failsWith (run status "\"wat\"") "at $ invalid: unknown status wat"
-
--- inner decoder failure is not masked
-#guard failsWith (run status "1") "at $ expecting string but got number"
-
--- error is reported at the field
-#guard
-  failsWith (run (Decode.field "s" status) "{\"s\": \"wat\"}") "at $.s invalid: unknown status wat"
+#guard okEq (decode (orNone int) (j "3")) (some (3 : Int))
+#guard okEq (decode (orNone int) (j "\"x\"")) (none : Option Int)
 
 /-! ## decode with a starting path -/
 
-#guard failsWith (runAt [.key "root"] Decode.str "1") "at $.root expecting string but got number"
+#guard errIs (decode int (j "\"x\"") [.key "root"]) (.wrongType "integer") "$.root"
+#guard errIs (decode int (j "\"x\"") [.idx 0, .key "root"]) (.wrongType "integer") "$.root[0]"
 
-/-! ## A realistic record decoder -/
+/-! ## Error rendering -/
+
+#guard errMsg (decode (field "b" int) (j "{}")) "at $ field b not found"
+#guard errMsg (decode (index 3 int) (j "[]")) "at $ index 3 out of bound"
+#guard errMsg (decode (field "a" int) (j "{\"a\":\"x\"}")) "at $.a expecting integer but got string"
+#guard errMsg (decode (field "a" (field "b" nat)) (j "{\"a\":{\"b\":-1}}"))
+  "at $.a.b invalid: expecting a non-negative integer"
+
+/-! ## A record decoder end to end -/
 
 structure User where
   name : String
   age : Nat
-  tags : Array String
-  deriving BEq
+  email : Option String
+  deriving BEq, Repr
 
-namespace User.Example
+def user : Decoder User := do
+  let name <- field "name" str
+  let age <- field "age" nat
+  let email <- optField "email" str
+  pure { name, age, email }
 
-def decoder : Decode User := do
-  let name ← Decode.field "name" Decode.str
-  let age ← Decode.field "age" Decode.nat
-  let tags ← Decode.field "tags" (Decode.array Decode.str)
-  pure { name, age, tags }
+#guard okEq (decode user (j "{\"name\":\"ann\",\"age\":30}"))
+  ({ name := "ann", age := 30, email := none } : User)
+#guard okEq (decode user (j "{\"name\":\"ann\",\"age\":30,\"email\":\"a@b.c\"}"))
+  ({ name := "ann", age := 30, email := some "a@b.c" } : User)
+#guard okEq (decode user (j "{\"name\":\"ann\",\"age\":30,\"email\":null}"))
+  ({ name := "ann", age := 30, email := none } : User)
+#guard errIs (decode user (j "{\"name\":\"ann\"}")) (.missing "age") "$"
+#guard errIs (decode user (j "{\"name\":\"ann\",\"age\":-2}"))
+  (.invalid "expecting a non-negative integer") "$.age"
+#guard errIs (decode (array user) (j "[{\"name\":\"a\",\"age\":1},{\"name\":\"b\"}]"))
+  (.missing "age") "$[1]"
 
-end User.Example
-
-#guard
-  succeeds (run User.Example.decoder "{\"name\": \"ann\", \"age\": 30, \"tags\": [\"a\", \"b\"]}")
-    { name := "ann", age := 30, tags := #["a", "b"] }
-
--- the first failure wins
-#guard
-  failsWith (run User.Example.decoder "{\"name\": \"ann\", \"tags\": []}")
-    "at $ field age not found"
-
-#guard
-  failsWith (run User.Example.decoder "{\"name\": \"ann\", \"age\": 30, \"tags\": [\"a\", 1]}")
-    "at $.tags[1] expecting string but got number"
+end Tests

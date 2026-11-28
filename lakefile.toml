@@ -1,10 +1,10 @@
 name = "json-decode"
 version = "0.1.0"
-defaultTargets = ["JsonDecode"]
+defaultTargets = ["Main"]
 testDriver = "Tests"
 
 [[lean_lib]]
-name = "JsonDecode"
+name = "JsonDecoder"
 
 [[lean_lib]]
 name = "Tests"
